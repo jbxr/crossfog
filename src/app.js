@@ -1,6 +1,6 @@
 // Crossfog UI. Reads derived state from the engine, turns taps into events,
 // and turns the engine's feed into sounds, toasts and animations.
-import { buildBoard, replay, queries, COST, PAY, META_ID, rng } from './engine.js';
+import { buildBoard, initialState, apply, cloneState, queries, COST, PAY, META_ID, rng } from './engine.js';
 import { sharedGame, soloGame, fakeSharedGame, uuid } from './sync.js';
 import { makeSfx } from './sfx.js';
 import CONFIG from '../config.js';
@@ -51,21 +51,44 @@ const seatOf = uid => net?.players.get(uid)?.seat ?? 0;
 const isMe = uid => uid === net?.me.id;
 const fid = f => `${f.key}:${f.kind}:${f.wi ?? f.gid ?? f.region ?? ''}`;
 
+// The confirmed part of the log only ever grows at the end (except in the rare
+// case two moves arrive out of order), so its state is kept and extended
+// rather than replayed from scratch on every keystroke. Pending moves, the
+// ones still on their way to the server, go on a cheap copy.
+let base = null, baseN = 0, feedSeenN = 0, lastSeenSaved = 0;
+const confirmedIds = new Set();
+function currentState() {
+  if (!base || baseN > confirmed.length) { base = initialState(B); baseN = 0; }
+  for (; baseN < confirmed.length; baseN++) apply(B, base, confirmed[baseN]);
+  if (!pending.length) return base;
+  const s = cloneState(base);
+  for (const ev of pending) apply(B, s, ev);
+  return s;
+}
 function recompute(initial = false) {
-  S = replay(B, confirmed.concat(pending));
+  S = currentState();
   q = queries(B, S);
-  const fresh = S.feed.filter(f => !seen.has(fid(f)));
-  fresh.forEach(f => seen.add(fid(f)));
-  if (!initial) effects(fresh);
-  trackStats(initial);
-  nudge(initial);
-  if (document.visibilityState === 'visible' && confirmed.length) store.set('crossfog.seen.' + net.game.id, confirmed[confirmed.length - 1].id);
-  render();
+  const fresh = [];
+  for (let i = initial ? S.feed.length : 0; i < S.feed.length; i++) {
+    const f = S.feed[i], id = fid(f);
+    if (!seen.has(id)) { seen.add(id); fresh.push(f); }
+  }
+  if (initial) S.feed.forEach(f => seen.add(fid(f)));
+  if (fresh.length) effects(fresh);
+  if (fresh.length || initial) { trackStats(initial); nudge(initial); }
+  const last = confirmed.length ? confirmed[confirmed.length - 1].id : 0;
+  if (document.visibilityState === 'visible' && last !== lastSeenSaved) { lastSeenSaved = last; store.set('crossfog.seen.' + net.game.id, last); }
+  scheduleRender();
 }
 function addConfirmed(ev) {
-  if (confirmed.some(c => c.id === ev.id)) return;
+  if (confirmedIds.has(ev.id)) return false;
+  confirmedIds.add(ev.id);
   confirmed.push(ev);
-  if (confirmed.length > 1 && confirmed[confirmed.length - 2].id > ev.id) confirmed.sort((a, b) => a.id - b.id);
+  if (confirmed.length > 1 && confirmed[confirmed.length - 2].id > ev.id) {
+    confirmed.sort((a, b) => a.id - b.id);
+    base = null; // out of order: rebuild once from the top
+  }
+  return true;
 }
 function dispatch(t, payload) {
   if (!net || S.done) return;
@@ -83,8 +106,14 @@ function dispatch(t, payload) {
   });
 }
 function onRemote(evs) {
-  evs.forEach(e => { pending = pending.filter(p => p.key !== e.key); addConfirmed(e); });
-  recompute();
+  let changed = false;
+  evs.forEach(e => {
+    // our own moves echo back over realtime; they're already confirmed
+    if (confirmedIds.has(e.id)) return;
+    pending = pending.filter(p => p.key !== e.key);
+    changed = addConfirmed(e) || changed;
+  });
+  if (changed) recompute();
 }
 
 /* ---------- feed → sounds, toasts, animation ---------- */
@@ -310,20 +339,57 @@ function submitGroup() {
 /* ---------- rendering ---------- */
 const board = $('board'), viewport = $('viewport'), tilesEl = $('tiles'), labelsEl = $('labels');
 const bgC = $('bgCanvas'), fogC = $('fogCanvas');
+// A board-sized canvas is expensive for the phone to keep on screen: it gets
+// re-composited on every frame, which made each keystroke lag. So the art is
+// drawn on a canvas, turned into a plain image, and the canvas is hidden.
+// The canvas only stays visible while the fog is animating away.
+const artImg = { bgCanvas: $('bgImg'), fogCanvas: $('fogImg') };
+const artGen = { bgCanvas: 0, fogCanvas: 0 };
+function freeze(cv) {
+  const img = artImg[cv.id], gen = ++artGen[cv.id];
+  img.style.width = cv.style.width; img.style.height = cv.style.height;
+  cv.toBlob(blob => {
+    if (!blob || gen !== artGen[cv.id]) return;
+    const url = URL.createObjectURL(blob), old = img.src;
+    img.onload = () => {
+      if (gen !== artGen[cv.id]) return;
+      cv.style.display = 'none'; img.style.visibility = 'visible';
+      if (old.startsWith('blob:')) URL.revokeObjectURL(old);
+    };
+    img.src = url;
+  });
+}
+function thaw(cv) { artGen[cv.id]++; cv.style.display = ''; artImg[cv.id].style.visibility = 'hidden'; }
 let drawn = '';
 
-function commit(scroll = true) {
-  render();
-  if (scroll) ensureVisible(ui.cell);
+// Rendering is batched to one pass per animation frame, however many state
+// changes land in between (a keystroke, the server's confirmation, a
+// teammate's move), and tiles are patched in place rather than rebuilt.
+let renderQueued = false, scrollQueued = false;
+function scheduleRender(scroll = false) {
+  scrollQueued = scrollQueued || scroll;
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    render();
+    if (scrollQueued) { scrollQueued = false; ensureVisible(ui.cell); }
+  });
 }
+function commit(scroll = true) { scheduleRender(scroll); }
+const setHTML = (el, html) => { if (el._html !== html) { el._html = html; el.innerHTML = html; } };
+const setText = (el, t) => { t = String(t); if (el.textContent !== t) el.textContent = t; };
+const setAttr = (el, a, v) => { if (el.getAttribute(a) !== v) el.setAttribute(a, v); };
+let lastFont = null, lastGold = null;
 function render() {
   if (!S) return;
   if (!ui.cell || !B.CELLS[ui.cell] || !q.cellVis(ui.cell)) {
     const first = B.ORDER.find(wi => q.wordVis(wi) && !q.isSolved(wi) && q.playable(wi)) ?? B.ORDER.find(q.wordVis);
     selectWord(first);
   }
-  document.body.classList.toggle('gold', M.tiles === 'gold');
-  document.documentElement.style.setProperty('--f-tile', FONTS[M.font].css);
+  const gold = M.tiles === 'gold';
+  if (gold !== lastGold) { lastGold = gold; document.body.classList.toggle('gold', gold); }
+  if (M.font !== lastFont) { lastFont = M.font; document.documentElement.style.setProperty('--f-tile', FONTS[M.font].css); }
   const key = [...S.revealed].join() + '|' + ui.cs + '|' + themeKey();
   if (key !== drawn) { drawn = key; layout(); }
   renderTiles();
@@ -332,41 +398,57 @@ function render() {
   renderClue();
   if (!$('sheet').hidden) renderSheet();
 }
+const tileEls = new Map();   // cell key -> element
+const badUntil = new Map();  // cell key -> time its red "wrong" flash ends
+const POP = [{ transform: 'scale(1)' }, { transform: 'scale(1.18)', offset: .4 }, { transform: 'scale(1)' }];
+const SHAKE = [{ transform: 'none' }, { transform: 'translateX(-3px)' }, { transform: 'translateX(3px)' }, { transform: 'translateX(-3px)' }, { transform: 'translateX(3px)' }, { transform: 'none' }];
+const ARRIVE = [{ transform: 'scale(.3)', opacity: 0 }, { transform: 'scale(1)', opacity: 1 }];
 function renderTiles() {
   const wi = activeWord();
-  const aw = wi === undefined ? [] : W()[wi].cells;
+  const aw = new Set(wi === undefined ? [] : W()[wi].cells);
   const starts = {};
   W().forEach(w => { if (q.wordVis(w.id)) starts[w.cells[0]] = w.num; });
-  let html = '';
+  const now = performance.now();
   for (const k in B.CELLS) {
-    if (!q.cellVis(k)) continue;
+    if (!q.cellVis(k)) { const gone = tileEls.get(k); if (gone) { gone.remove(); tileEls.delete(k); } continue; }
     const c = B.CELLS[k];
+    let el = tileEls.get(k);
+    if (!el) {
+      el = document.createElement('div');
+      el.dataset.k = k;
+      tilesEl.appendChild(el);
+      tileEls.set(k, el);
+    }
     const sw = c.words.find(q.isSolved);
     const reg = sw !== undefined ? W()[sw].region : W()[c.words.find(q.wordVis)].region;
-    const cls = ['tile'];
-    if (sw !== undefined) cls.push('solved');
-    if (aw.includes(k)) cls.push('word');
-    if (k === ui.cell) cls.push('cur');
-    if (S.hinted[k]) cls.push('hinted');
-    if (c.words.some(x => !q.wordVis(x))) cls.push('edge');
-    if (sw === undefined && !c.words.some(x => q.wordVis(x) && q.playable(x))) cls.push('gated');
+    let cls = 'tile';
+    if (sw !== undefined) cls += ' solved';
+    if (aw.has(k)) cls += ' word';
+    if (k === ui.cell) cls += ' cur';
+    if (S.hinted[k]) cls += ' hinted';
+    if (c.words.some(x => !q.wordVis(x))) cls += ' edge';
+    if (sw === undefined && !c.words.some(x => q.wordVis(x) && q.playable(x))) cls += ' gated';
     const gw = c.words.find(x => !W()[x].meta && q.groupFound(W()[x].gid));
     let gc = '';
-    if (gw !== undefined) { cls.push('grouped'); gc = `;--gc:var(--g${B.GROUPS[W()[gw].gid].index})`; }
-    let d = 0;
-    if (ui.flash.bad.has(k)) cls.push('bad');
-    else if (ui.flash.pop.has(k) && !reduced) { cls.push('pop'); d = ui.flash.pop.get(k); }
-    const arriving = c.words.find(x => ui.arrive[W()[x].region] && !c.words.some(y => W()[y].region !== W()[x].region && q.isRev(W()[y].region)));
-    if (arriving !== undefined && !reduced) {
-      cls.push('arrive');
-      d = Math.min(700, [...B.REGION_CELLS[W()[arriving].region]].indexOf(k) * 18);
-    }
+    if (gw !== undefined) { cls += ' grouped'; gc = `;--gc:var(--g${B.GROUPS[W()[gw].gid].index})`; }
+    if ((badUntil.get(k) || 0) > now) cls += ' bad';
     const f = S.fills[k];
-    html += `<div class="${cls.join(' ')}" data-k="${k}" style="--x:${c.c};--y:${c.r};--rt:${B.REG[reg].tint};--d:${d}ms${gc}${f ? `;--pc:var(--p${seatOf(f.by) + 1})` : ''}">`
-      + (starts[k] ? `<span class="n">${starts[k]}</span>` : '')
-      + (f ? `<span class="l">${f.ch}</span>` : '') + '</div>';
+    const style = `--x:${c.c};--y:${c.r};--rt:${B.REG[reg].tint}${gc}${f ? `;--pc:var(--p${seatOf(f.by) + 1})` : ''}`;
+    const html = (starts[k] ? `<span class="n">${starts[k]}</span>` : '') + (f ? `<span class="l">${f.ch}</span>` : '');
+    if (el.className !== cls) el.className = cls;
+    if (el._style !== style) { el._style = style; el.setAttribute('style', style); }
+    setHTML(el, html);
+    if (!reduced && el.animate) {
+      const arriving = ui.arrive[reg] && !c.words.some(y => W()[y].region !== reg && q.isRev(W()[y].region));
+      if (arriving) el.animate(ARRIVE, { duration: 550, delay: Math.min(700, [...B.REGION_CELLS[reg]].indexOf(k) * 18), easing: 'cubic-bezier(.2,.9,.3,1.25)', fill: 'backwards' });
+      else if (ui.flash.bad.has(k)) el.animate(SHAKE, { duration: 420 });
+      else if (ui.flash.pop.has(k)) el.animate(POP, { duration: 500, delay: ui.flash.pop.get(k), easing: 'cubic-bezier(.2,.9,.3,1.4)' });
+    }
   }
-  tilesEl.innerHTML = html;
+  if (ui.flash.bad.size) {
+    ui.flash.bad.forEach(k => badUntil.set(k, now + 450));
+    setTimeout(() => scheduleRender(), 470);
+  }
   ui.flash.bad.clear(); ui.flash.pop.clear(); ui.arrive = {};
 }
 const LABEL_SPOT = {};
@@ -396,7 +478,7 @@ function computeLabelSpots() {
   });
 }
 function renderLabels() {
-  labelsEl.innerHTML = B.DATA.regions.map(r => {
+  setHTML(labelsEl, B.DATA.regions.map(r => {
     const s = LABEL_SPOT[r.id];
     if (r.id === META_ID) {
       const n = q.keysNamed();
@@ -408,7 +490,7 @@ function renderLabels() {
       return `<div class="rlabel" style="--x:${s.c};--y:${s.r}">${r.name} ${f === 4 ? '<span class="ok">✓</span>' : `<span style="color:var(--muted);font-weight:600">${f}/4 groups</span>`}</div>`;
     }
     return `<div class="rlabel fogged" style="--x:${s.c};--y:${s.r}">Uncharted · ${B.REGION_WORDS[r.id].length} clues</div>`;
-  }).join('');
+  }).join(''));
 }
 const ICON_SOUND_ON = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></svg>';
 const ICON_SOUND_OFF = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/><path d="M17 9l5 6M22 9l-5 6"/></svg>';
@@ -420,8 +502,8 @@ function avatarHtml(uid) {
 }
 const roster = () => [...net.players.entries()].sort((a, b) => a[1].seat - b[1].seat);
 function renderHud() {
-  $('progress').textContent = `${q.keysNamed()}/${B.DATA.groups.length}`;
-  $('coins').textContent = S.coins;
+  setText($('progress'), `${q.keysNamed()}/${B.DATA.groups.length}`);
+  setText($('coins'), S.coins);
   const aw = activeWord();
   const open = q.playable(aw);
   const lockedKey = aw !== undefined && W()[aw].meta && !q.groupFound(W()[aw].gid);
@@ -441,38 +523,39 @@ function renderHud() {
   $('hintWord').disabled = S.done || !open || S.coins < COST.word;
   const nLoose = B.SECTIONS.filter(q.regionOpen).reduce((a, r) => a + q.loose(r).length, 0);
   $('groupsBadge').hidden = nLoose < 1;
-  $('groupsBadge').textContent = `${nLoose} ready`;
+  setText($('groupsBadge'), `${nLoose} ready`);
   $('groupsBtn').classList.toggle('ready', nLoose >= 4 && !S.done);
   $('groupsBtn').setAttribute('aria-label', `Groups: ${nLoose} solved answers waiting to be grouped`);
   // with three or four players the names don't fit, so chips go to avatar + count
   const compact = net.players.size > 2;
-  $('players').innerHTML = (compact || net.mode === 'shared' ? '' : '<span class="players-label">Team</span>') + roster().map(([uid, p]) =>
+  setHTML($('players'), (compact || net.mode === 'shared' ? '' : '<span class="players-label">Team</span>') + roster().map(([uid, p]) =>
     `<span class="chip${isMe(uid) ? ' you' : ''}" style="--pc:var(--p${p.seat + 1})" title="${esc(p.name)}" aria-label="${esc(p.name)}${isMe(uid) ? ' (you)' : ''}, ${S.by[uid] || 0} solves">${avatarHtml(uid)}${compact ? '' : (isMe(uid) && net.mode === 'shared' ? 'You' : esc(p.name))}<small>${S.by[uid] || 0}</small></span>`).join('')
-    + (net.mode === 'shared' && net.players.size < 4 ? '<button class="chip invite-chip" id="inviteChip" aria-label="Invite a teammate" title="Invite a teammate">+</button>' : '');
+    + (net.mode === 'shared' && net.players.size < 4 ? '<button class="chip invite-chip" id="inviteChip" aria-label="Invite a teammate" title="Invite a teammate">+</button>' : ''));
   $('coach').hidden = M.coached || S.found.length > 0 || !$('away').hidden;
-  $('coachText').innerHTML = 'These 16 clues hide four groups of four. Solve clues, then tap <b>Groups</b> under the clue to sort your answers into fours. '
-    + 'Each group\'s one-word link goes in the <b>Key Grid</b>. Fill the Key Grid to win.';
+  setHTML($('coachText'), 'These 16 clues hide four groups of four. Solve clues, then tap <b>Groups</b> under the clue to sort your answers into fours. '
+    + 'Each group\'s one-word link goes in the <b>Key Grid</b>. Fill the Key Grid to win.');
   const sb = $('soundBtn');
   sb.setAttribute('aria-pressed', String(M.sound !== false));
   sb.setAttribute('aria-label', M.sound !== false ? 'Mute sound' : 'Turn sound on');
-  sb.innerHTML = M.sound !== false ? ICON_SOUND_ON : ICON_SOUND_OFF;
+  setHTML(sb, M.sound !== false ? ICON_SOUND_ON : ICON_SOUND_OFF);
 }
 function renderClue() {
   const wi = activeWord();
   if (wi === undefined) return;
   const w = W()[wi];
-  $('clueNum').textContent = w.label;
+  setText($('clueNum'), w.label);
   const open = q.playable(wi);
   $('clueRegion').textContent = open ? B.REG[w.region].name
     : w.meta ? `${w.answer.length} letters · locked`
     : `Locked: find ${B.REG[q.parentOf(w.region)].name}'s groups first`;
-  $('clueText').textContent = q.clueOf(wi);
+  setText($('clueText'), q.clueOf(wi));
   $('clue').classList.toggle('done', q.isSolved(wi));
   $('clue').classList.toggle('gated', !open);
 }
 
 /* ---------- canvas ---------- */
-function themeKey() { return css('--fog') + css('--region-alpha'); }
+let themeCache = null;
+function themeKey() { return themeCache ??= css('--fog') + css('--region-alpha'); }
 function layout() {
   const cs = ui.cs, Wd = (B.DATA.width + PAD * 2) * cs, H = (B.DATA.height + PAD * 2) * cs;
   board.style.setProperty('--cs', cs + 'px');
@@ -565,6 +648,7 @@ function drawBg() {
     (MOTIF[r.motif] || (() => {}))(ctx, b, cs, m, rng(r.id));
     ctx.restore();
   });
+  freeze(bgC);
 }
 let fogRaf = 0;
 function drawFog() {
@@ -599,7 +683,8 @@ function drawFog() {
     puffs.forEach(([x, y, rad], i) => { if (i % 2) return; ctx.beginPath(); ctx.arc(x - rad * .25, y - rad * .3, rad * .42 * grow, 0, 7); ctx.fill(); });
     ctx.globalAlpha = 1;
   });
-  if (anim) fogRaf = requestAnimationFrame(drawFog);
+  if (anim) { thaw(fogC); fogRaf = requestAnimationFrame(drawFog); }
+  else freeze(fogC);
 }
 
 /* ---------- view ---------- */
@@ -797,6 +882,9 @@ async function start(adapter) {
   if (unsubscribe) unsubscribe();
   net = adapter;
   confirmed = (await net.load()).slice().sort((a, b) => a.id - b.id);
+  confirmedIds.clear(); confirmed.forEach(e => confirmedIds.add(e.id));
+  base = null; baseN = 0; lastSeenSaved = 0;
+  tileEls.clear(); tilesEl.innerHTML = '';
   pending = []; seen.clear();
   ui.cell = null; ui.sel.clear(); ui.gsec = null; ui.fogFade = {}; ui.arrive = {};
   drawn = '';
@@ -845,12 +933,31 @@ async function copyText(text) {
 }
 function wire() {
   const live = fn => (...a) => { if (net && S) fn(...a); };
-  $('kbd').addEventListener('click', live(e => {
-    const b = e.target.closest('[data-key]'); if (!b) return;
+  // Keys fire on touch-down, not on release: a click on a phone only arrives
+  // after the finger lifts, which makes fast typing feel sticky. A click
+  // (keyboard Enter, a mouse, a screen reader) still works on its own.
+  const pressKey = b => {
     const k = b.dataset.key;
     if (k === 'back') back();
     else if (k === 'dir') tapCell(ui.cell);
     else type(k);
+  };
+  let lastDown = 0;
+  $('kbd').addEventListener('pointerdown', live(e => {
+    const b = e.target.closest('[data-key]'); if (!b || e.button > 0) return;
+    e.preventDefault();
+    lastDown = performance.now();
+    b.classList.add('down');
+    pressKey(b);
+  }));
+  const up = e => { const b = e.target.closest && e.target.closest('[data-key]'); if (b) b.classList.remove('down'); };
+  $('kbd').addEventListener('pointerup', up);
+  $('kbd').addEventListener('pointercancel', up);
+  $('kbd').addEventListener('pointerleave', e => { document.querySelectorAll('.key.down').forEach(k => k.classList.remove('down')); });
+  $('kbd').addEventListener('click', live(e => {
+    const b = e.target.closest('[data-key]'); if (!b) return;
+    if (performance.now() - lastDown < 800) return; // already handled on pointerdown
+    pressKey(b);
   }));
   tilesEl.addEventListener('click', live(e => { const t = e.target.closest('[data-k]'); if (t) tapCell(t.dataset.k); }));
   $('clue').addEventListener('click', live(() => tapCell(ui.cell)));
@@ -944,7 +1051,7 @@ function wire() {
     else if (k === 'ArrowDown') { moveArrow(1, 0); e.preventDefault(); }
     else if (k === 'ArrowUp') { moveArrow(-1, 0); e.preventDefault(); }
   });
-  const redraw = () => { drawn = ''; render(); };
+  const redraw = () => { drawn = ''; themeCache = null; scheduleRender(); };
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redraw);
   // phones drop sockets in the background; fetch anything missed on return
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') catchUp(); });

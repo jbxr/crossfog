@@ -92,3 +92,19 @@ assert.equal(state().coins, S.coins);
 
 const t0 = performance.now(); for (let i = 0; i < 20; i++) replay(B, log);
 console.log(`ok: ${log.length} events, by`, S.by, `coins ${S.coins}, replay ${((performance.now() - t0) / 20).toFixed(1)}ms`);
+
+// incremental play (as the app does it) must match a full replay
+{
+  const { initialState, apply, cloneState } = await import('../src/engine.js');
+  const flat = st => JSON.stringify({ ...st, solved: [...st.solved], revealed: [...st.revealed], foundSet: [...st.foundSet], clueBought: [...st.clueBought] });
+  for (const split of [0, 50, 200, log.length - 3, log.length]) {
+    const base = initialState(B);
+    log.slice(0, split).forEach(e => apply(B, base, e));
+    const before = flat(base);
+    const s = cloneState(base);
+    log.slice(split).forEach(e => apply(B, s, e));
+    assert.equal(flat(s), flat(replay(B, log)), `split ${split}`);
+    assert.equal(flat(base), before, 'clone must not leak writes into the base');
+  }
+  console.log('ok: incremental state matches replay');
+}

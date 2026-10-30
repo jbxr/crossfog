@@ -146,20 +146,22 @@ export function soloGame(boardId) {
   const meta = store.get('crossfog.meta.v1') || {};
   const me = { id: 'me', name: 'You' };
   const players = new Map([['me', { name: 'You', seat: 0, avatar: meta.soloAvatar || null }]]);
-  const read = () => store.get(key) || [];
+  let log = store.get(key) || [];
+  let saveT = 0;
+  const save = () => { clearTimeout(saveT); saveT = setTimeout(() => store.set(key, log), 400); };
+  addEventListener('pagehide', () => { clearTimeout(saveT); store.set(key, log); });
   return {
     mode: 'solo', me, players, game: { id: 'solo', code: null },
-    load: async () => read(),
-    catchUp: async afterId => read().filter(e => e.id > afterId),
+    load: async () => log.slice(),
+    catchUp: async afterId => log.filter(e => e.id > afterId),
     async send(ev) {
-      const log = read();
       const stored = { ...ev, id: (log.length ? log[log.length - 1].id : 0) + 1, at: new Date().toISOString() };
-      log.push(stored); store.set(key, log);
+      log.push(stored); save();
       return { id: stored.id, at: stored.at };
     },
     subscribe() { return () => {}; },
     async setAvatar(avatar) { players.get('me').avatar = avatar; const m = store.get('crossfog.meta.v1') || {}; m.soloAvatar = avatar; store.set('crossfog.meta.v1', m); },
-    reset() { store.set(key, []); },
+    reset() { log = []; clearTimeout(saveT); store.set(key, []); },
   };
 }
 

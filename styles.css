@@ -118,8 +118,8 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
   background-position: calc(var(--cs) / -2) calc(var(--cs) / -2);
 }
 .board canvas { position: absolute; left: 0; top: 0; pointer-events: none; }
-#fogCanvas { animation: drift 10s ease-in-out infinite alternate; }
-@keyframes drift { to { transform: translate(5px, -3px); } }
+.board .board-art { position: absolute; left: 0; top: 0; pointer-events: none; max-width: none; }
+.board .board-art:not([src]) { display: none; }
 #tiles, #labels { position: absolute; inset: 0; }
 #labels { pointer-events: none; }
 
@@ -149,7 +149,6 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
 .tile.edge::after { content: ""; position: absolute; right: calc(var(--cs) * -.16); bottom: calc(var(--cs) * -.12); width: calc(var(--cs) * .42); height: calc(var(--cs) * .26); border-radius: 999px; background: var(--fog); box-shadow: 0 0 0 1.5px var(--fog-ink), calc(var(--cs) * .1) calc(var(--cs) * -.08) 0 -1px var(--fog); }
 body.gold .tile.solved:not(.word):not(.cur) { background: linear-gradient(135deg, var(--gold-a), var(--gold-b)); border-color: var(--gold-b); }
 body.gold .tile.solved:not(.word):not(.cur) .l, body.gold .tile.solved:not(.word):not(.cur) .n { color: var(--gold-ink); }
-.tile.bad { animation: shake .42s; }
 .tile.bad .l { color: var(--wrong); }
 .tile.pop { animation: pop .5s cubic-bezier(.2, .9, .3, 1.4); animation-delay: var(--d); }
 .tile.arrive { animation: arrive .55s cubic-bezier(.2, .9, .3, 1.25) both; animation-delay: var(--d); }
@@ -192,9 +191,9 @@ body.gold .tile.solved:not(.word):not(.cur) .l, body.gold .tile.solved:not(.word
 .tool:disabled { opacity: .45; cursor: not-allowed; }
 .kbd { display: flex; flex-direction: column; gap: 6px; }
 .krow { display: flex; gap: 5px; justify-content: center; }
-.key { flex: 1 1 0; max-width: 46px; height: 44px; border-radius: 8px; border: 0; background: var(--key); box-shadow: 0 1.5px 0 var(--panel-line), 0 0 0 1px var(--panel-line); font: 700 17px/1 var(--f-body); padding: 0; }
+.key { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; flex: 1 1 0; max-width: 46px; height: 44px; border-radius: 8px; border: 0; background: var(--key); box-shadow: 0 1.5px 0 var(--panel-line), 0 0 0 1px var(--panel-line); font: 700 17px/1 var(--f-body); padding: 0; }
 .key.wide { max-width: 70px; flex-grow: 1.6; font-size: 15px; }
-.key:active { background: var(--hl); }
+.key:active, .key.down { background: var(--hl); }
 @media (pointer: fine) and (min-width: 900px) { .key { height: 38px; } }
 
 /* sheet */

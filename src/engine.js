@@ -253,6 +253,20 @@ export function apply(B, S, ev) {
   }
 }
 
+/** A copy that apply() can mutate without touching the original. */
+export function cloneState(S) {
+  return {
+    ...S,
+    fills: { ...S.fills }, hinted: { ...S.hinted },
+    solved: new Set(S.solved), solvedBy: { ...S.solvedBy },
+    revealed: new Set(S.revealed),
+    found: [...S.found], foundSet: new Set(S.foundSet),
+    clueBought: new Set(S.clueBought),
+    ladder: JSON.parse(JSON.stringify(S.ladder)),
+    by: { ...S.by }, feed: [...S.feed],
+  };
+}
+
 export function replay(B, events) {
   const S = initialState(B);
   for (const ev of events) apply(B, S, ev);
