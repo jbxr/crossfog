@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Crossfog</title>
+<meta name="description" content="A co-op crossword. Solve clues, sort the answers into groups of four, and name every link in the Key Grid.">
+<meta name="theme-color" content="#e6ecf2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111720" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Caveat:wght@700&family=Special+Elite&display=swap">
+<link rel="stylesheet" href="styles.css">
+<script type="module" src="src/app.js"></script>
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Crossfog</div>
+    <span class="pill" id="progressPill"><span id="progress">0/16</span><small>keys</small></span>
+    <button class="pill" id="walletBtn" aria-label="Team wallet"><span class="coin" aria-hidden="true"></span><span id="coins">6</span></button>
+    <button class="menu-btn" id="menuBtn">Menu</button>
+  </header>
+  <div class="row2">
+    <div class="players" id="players"></div>
+    <button class="kg" id="keyGridBtn">Key Grid</button>
+    <button class="snd" id="soundBtn" aria-pressed="true" aria-label="Mute sound"></button>
+  </div>
+  <div class="map-wrap">
+    <div class="viewport" id="viewport">
+      <div class="board" id="board">
+        <canvas id="bgCanvas"></canvas>
+        <canvas id="fogCanvas"></canvas>
+        <div id="tiles"></div>
+        <div id="labels"></div>
+      </div>
+    </div>
+    <div class="zoom">
+      <button id="zoomIn" aria-label="Zoom in">+</button>
+      <button id="zoomOut" aria-label="Zoom out">−</button>
+    </div>
+    <div class="coach" id="away" hidden>
+      <p id="awayText"></p>
+      <button id="awayClose">Nice</button>
+    </div>
+    <div class="coach" id="coach" hidden>
+      <p id="coachText"></p>
+      <button id="coachClose">Got it</button>
+    </div>
+    <div class="offline" id="offline" hidden>Reconnecting…</div>
+  </div>
+  <div class="dock">
+    <div class="cluebar">
+      <button class="arrow" id="prevClue" aria-label="Previous clue">‹</button>
+      <button class="clue" id="clue" aria-label="Switch direction">
+        <span class="clue-meta"><b id="clueNum"></b><span id="clueRegion"></span></span>
+        <span class="clue-text" id="clueText"></span>
+      </button>
+      <button class="arrow" id="nextClue" aria-label="Next clue">›</button>
+    </div>
+    <div class="tools">
+      <button class="tool groups" id="groupsBtn">Groups <span class="badge" id="groupsBadge" hidden></span></button>
+      <button class="tool" id="hintLetter"><span id="hlLabel">Letter</span> <span class="cost"><span class="coin" aria-hidden="true"></span><span id="hlCost">4</span></span></button>
+      <button class="tool" id="hintWord" aria-label="Reveal word">Word <span class="cost"><span class="coin" aria-hidden="true"></span><span id="hwCost">10</span></span></button>
+    </div>
+    <div class="kbd" id="kbd"></div>
+  </div>
+</div>
+
+<div class="sheet" id="sheet" hidden>
+  <div class="sheet-panel" role="dialog" aria-label="Menu">
+    <div class="sheet-head">
+      <div class="tabs" role="tablist">
+        <button role="tab" data-tab="groups" aria-selected="true">Groups</button>
+        <button role="tab" data-tab="clues" aria-selected="false">Clues</button>
+        <button role="tab" data-tab="team" aria-selected="false">Team</button>
+        <button role="tab" data-tab="settings" aria-selected="false">Settings</button>
+      </div>
+      <button class="close" id="sheetClose">Close</button>
+    </div>
+    <div class="sheet-body" id="sheetBody"></div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<div class="modal" id="winModal" hidden>
+  <div class="card" role="dialog" aria-labelledby="winTitle">
+    <h2 id="winTitle">Key Grid complete</h2>
+    <p id="winSub"></p>
+    <div class="stats" id="winStats"></div>
+    <div class="contrib" id="winContrib"></div>
+    <div class="actions">
+      <button class="secondary" id="winClose">Look around</button>
+      <button class="primary" id="winAgain">New game</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal lobby" id="lobby">
+  <form class="card" id="lobbyForm" aria-labelledby="lobbyTitle" novalidate>
+    <div class="lobby-brand"><span class="brand-mark big" aria-hidden="true"><i></i><i></i><i></i><i></i></span></div>
+    <h2 id="lobbyTitle">Crossfog</h2>
+    <p id="lobbyIntro">A co-op crossword for up to four people. Solve clues, sort the answers into groups of four, and name every link in the Key Grid. Play together whenever each of you has a minute.</p>
+    <label class="field" for="nameInput"><span>Your name</span>
+      <input id="nameInput" name="name" maxlength="24" autocomplete="nickname" placeholder="What your team calls you" required>
+    </label>
+    <div class="lobby-new" id="lobbyNew">
+      <button class="primary" type="button" id="newShared">Start a shared game</button>
+      <div class="join-row">
+        <label class="field" for="codeInput"><span>Or join with a code</span>
+          <input id="codeInput" name="code" maxlength="6" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="ABC123">
+        </label>
+        <button class="secondary" type="button" id="joinBtn">Join</button>
+      </div>
+      <button class="link-btn" type="button" id="soloBtn">Play solo on this phone</button>
+    </div>
+    <div class="lobby-join" id="lobbyJoin" hidden>
+      <button class="primary" type="submit" id="joinInvite">Join game <span id="inviteCode"></span></button>
+      <button class="link-btn" type="button" id="notMine">Start my own game instead</button>
+    </div>
+    <p class="lobby-error" id="lobbyError" role="alert" hidden></p>
+    <p class="lobby-busy" id="lobbyBusy" hidden>Connecting…</p>
+  </form>
+</div>
+</body>
+</html>
